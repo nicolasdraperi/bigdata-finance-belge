@@ -1,0 +1,32 @@
+[
+  {
+    "name": "TS01dc4fc6",
+    "value": "01b8f84c94927cd3b74814904ad304a66c387601907e7dc6b09d023b01849c6d0c396d3a56c4fc0e11c3ada74dd7ec2a31a9130e66",
+    "domain": "statuts.notaire.be",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Strict"
+  },
+  {
+    "name": "Lyp1CWKh",
+    "value": "A9n41hefAQAA7eC_NZJZPB2PWP8H_8pPvkpfT0SemZEurKe3zvxuxEQVPMARAVy4cWSucsiSwH8AAEB3AAAAAA==",
+    "domain": "statuts.notaire.be",
+    "path": "/",
+    "expires": 1814368344.421587,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "OClmoOot",
+    "value": "A__x1hefAQAAECql6C3vWwL59D2v5S42SuBKWFac4fGcy1sFE1ONll_8xARJAVy4cWSucsiSwH8AAEB3AAAAAA|1|1|2eb9824d5b72a3dbffb0e1dee1b0f2a45b68c3d1",
+    "domain": "statuts.notaire.be",
+    "path": "/",
+    "expires": 1817371392.863626,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  }
+]
