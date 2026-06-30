@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb wget gnupg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 USER airflow
-RUN pip install --no-cache-dir requests beautifulsoup4 lxml hdfs playwright pyvirtualdisplay
+RUN pip install --no-cache-dir requests beautifulsoup4 lxml hdfs playwright pyvirtualdisplay pymongo
 USER root
 RUN /home/airflow/.local/bin/playwright install-deps chromium
 USER airflow

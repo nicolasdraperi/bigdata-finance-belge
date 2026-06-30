@@ -4,6 +4,8 @@ import requests
 from hdfs import InsecureClient
 import os
 from pathlib import Path
+from pymongo import MongoClient
+import csv
 
 HDFS_URL    = "http://namenode:9870"
 HDFS_USER   = "root"
@@ -21,54 +23,71 @@ CBSO_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 ENTREPRISES = ["0878065378", "0836157420", "0203430576"]
 
-import csv
 
 def get_entreprises_from_csv(limit=None):
-    path = Path("/opt/airflow/data/enterprise.csv")
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier introuvable : {path}")
+    client = MongoClient(MONGO_URI)
+    coll = client[MONGO_DB]["enterprise"]
+    cur = coll.find({}, {"EnterpriseNumber": 1, "_id": 0})
+    if limit:
+        cur = cur.limit(limit)
     numeros = []
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            numero = (row.get("EnterpriseNumber") or row.get("enterprise_number")
-                      or row.get("enterpriseNumber") or row.get("Number") or row.get("number"))
-            if not numero:
-                continue
-            numero = re.sub(r"\D", "", numero).zfill(10)
-            if numero:
-                numeros.append(numero)
-            if limit and len(numeros) >= limit:
-                break
+    for doc in cur:
+        num = doc.get("EnterpriseNumber")
+        if num:
+            numeros.append(re.sub(r"\D", "", num).zfill(10))
+    client.close()
     return numeros
 
 LOCAL_CSV_DIR = "/opt/airflow/data"
-CSV_HDFS_DIR = "/data/raw/kbo_registry"
+MONGO_URI = "mongodb://root:root@mongo:27017/"
+MONGO_DB  = "bce"
 
-def ingest_local_csv_to_hdfs():
+INDEX_FIELDS = {
+    "enterprise":    ["EnterpriseNumber"],
+    "denomination":  ["EntityNumber"],
+    "address":       ["EntityNumber"],
+    "activity":      ["EntityNumber"],
+    "contact":       ["EntityNumber"],
+    "establishment": ["EnterpriseNumber", "EstablishmentNumber"],
+    "branch":        ["EnterpriseNumber"],
+    "code":          ["Category", "Code"],
+}
+
+def ingest_csv_to_mongo(batch_size=50000, force=False):
+    import csv as _csv
     csv_dir = Path(LOCAL_CSV_DIR)
-
     if not csv_dir.exists():
         raise FileNotFoundError(f"Dossier CSV introuvable : {LOCAL_CSV_DIR}")
 
-    files = list(csv_dir.glob("*.csv"))
+    client = MongoClient(MONGO_URI)
+    db = client[MONGO_DB]
+    resume = {}
+    for file in sorted(csv_dir.glob("*.csv")):
+        coll_name = file.stem
+        coll = db[coll_name]
+        existing = coll.estimated_document_count()
+        if existing > 0 and not force:
+            print(f"  {coll_name}: déjà {existing} docs -> SKIP", flush=True)
+            resume[coll_name] = {"rows": existing, "status": "skipped"}
+            continue
 
-    if not files:
-        raise FileNotFoundError(f"Aucun CSV trouvé dans : {LOCAL_CSV_DIR}")
-
-    _hdfs.makedirs(CSV_HDFS_DIR)
-
-    uploaded = []
-
-    for file in files:
-        hdfs_path = f"{CSV_HDFS_DIR}/{file.name}"
-
-        with open(file, "rb") as f:
-            _hdfs.write(hdfs_path, data=f.read(), overwrite=True)
-
-        uploaded.append(hdfs_path)
-
-    return uploaded
+        coll.drop()
+        total = 0
+        with open(file, "r", encoding="utf-8-sig", newline="") as f:
+            batch = []
+            for row in _csv.DictReader(f):
+                batch.append(row)
+                if len(batch) >= batch_size:
+                    coll.insert_many(batch, ordered=False); total += len(batch); batch = []
+            if batch:
+                coll.insert_many(batch, ordered=False); total += len(batch)
+        for field in INDEX_FIELDS.get(coll_name, []):
+            coll.create_index(field)
+        resume[coll_name] = {"rows": total, "status": "loaded",
+                             "index": INDEX_FIELDS.get(coll_name, [])}
+        print(f"  {coll_name}: {total} docs -> LOADED", flush=True)
+    client.close()
+    return resume
 def save_raw(source, num_url, filename, content):
     numero = re.sub(r"\D", "", num_url).zfill(10)
     path = f"{RAW_HDFS}/{source}/{numero}/{filename}"
@@ -245,7 +264,7 @@ def _renouveler_cookie():
             browser.close()
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
 
-def get_cookie_notaire(force=False):
+def get_cookie_notaire(force=False, allow_renew=True):
     if not force:
         try:
             with _hdfs.read(COOKIE_HDFS, encoding="utf-8") as f:
@@ -254,13 +273,19 @@ def get_cookie_notaire(force=False):
                 return cached
         except Exception:
             pass
+    if not allow_renew:
+        try:
+            with _hdfs.read(COOKIE_HDFS, encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
     cookie = _renouveler_cookie()
     _hdfs.makedirs(COOKIE_HDFS.rsplit("/", 1)[0])
     _hdfs.write(COOKIE_HDFS, data=cookie, overwrite=True)
     return cookie
 
 def ingest_notaire(num_url, cookie=None):
-    cookie = cookie or get_cookie_notaire()
+    cookie = cookie or get_cookie_notaire(allow_renew=False)
     items  = statuts_kbo(num_url, cookie=cookie)
     save_raw("notaire", num_url, "statutes.json",
              json.dumps(items, ensure_ascii=False, indent=2))

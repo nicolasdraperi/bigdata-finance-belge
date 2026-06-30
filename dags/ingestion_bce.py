@@ -30,8 +30,8 @@ def ingestion_bce():
         return "ok"
 
     @task
-    def t_csv_local():
-        return ing.ingest_local_csv_to_hdfs()
+    def t_csv_mongo():
+        return ing.ingest_csv_to_mongo()
 
     @task(retries=2)
     def t_kbopub(num: str):
@@ -58,7 +58,7 @@ def ingestion_bce():
 
     cookie_ready = prep_cookie()
 
-    csv_done = t_csv_local()
+    csv_done = t_csv_mongo()
 
     kbopub_tasks = t_kbopub.expand(num=nums)
     ejustice_tasks = t_ejustice.expand(num=nums)

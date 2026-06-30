@@ -18,6 +18,17 @@ x-airflow-common: &airflow-common
     - bce_net
 
 services:
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    ports:
+      - "27017:27017"          # accessible depuis ton PC (pour vérifier avec Compass)
+    volumes:
+      - mongo-data:/data/db
+    networks: [ bce_net ]         # même réseau que tout le reste
   postgres:
     image: postgres:13
     environment:
@@ -91,6 +102,7 @@ volumes:
   postgres-db:
   hdfs-namenode:
   hdfs-datanode:
+  mongo-data:
 
 networks:
   bce_net:
