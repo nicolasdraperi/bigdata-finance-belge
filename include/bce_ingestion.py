@@ -20,9 +20,11 @@ EJ_BASE  = "https://www.ejustice.just.fgov.be/cgi_tsv/list.pl"
 BROKER   = "https://consult.cbso.nbb.be/api/external/broker/public/deposits"
 CBSO_API = "https://consult.cbso.nbb.be/api/rs-consult/published-deposits"
 CBSO_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-
-ENTREPRISES = ["0878065378", "0836157420", "0203430576"]
-
+LOCAL_CSV_DIR = "/opt/airflow/data"
+MONGO_URI = "mongodb://root:root@mongo:27017/"
+MONGO_DB  = "bce"
+class RateLimited(Exception):
+    pass
 
 def get_entreprises_from_csv(limit=None):
     client = MongoClient(MONGO_URI)
@@ -38,10 +40,6 @@ def get_entreprises_from_csv(limit=None):
     client.close()
     return numeros
 
-LOCAL_CSV_DIR = "/opt/airflow/data"
-MONGO_URI = "mongodb://root:root@mongo:27017/"
-MONGO_DB  = "bce"
-
 INDEX_FIELDS = {
     "enterprise":    ["EnterpriseNumber"],
     "denomination":  ["EntityNumber"],
@@ -52,22 +50,6 @@ INDEX_FIELDS = {
     "branch":        ["EnterpriseNumber"],
     "code":          ["Category", "Code"],
 }
-
-def build_enterprise_finale():
-    client = MongoClient(MONGO_URI)
-    db = client[MONGO_DB]
-    pipeline = [
-        {"$lookup": {"from": "denomination",  "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "denominations"}},
-        {"$lookup": {"from": "address",       "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "addresses"}},
-        {"$lookup": {"from": "activity",      "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "activities"}},
-        {"$lookup": {"from": "contact",       "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "contacts"}},
-        {"$lookup": {"from": "establishment", "localField": "EnterpriseNumber", "foreignField": "EnterpriseNumber", "as": "establishments"}},
-        {"$merge": {"into": "enterprise_finale", "whenMatched": "replace", "whenNotMatched": "insert"}},
-    ]
-    db.enterprise.aggregate(pipeline, allowDiskUse=True)
-    n = db["enterprise_finale"].estimated_document_count()
-    client.close()
-    return {"enterprise_finale": n}
 
 def ingest_csv_to_mongo(batch_size=50000, force=False):
     import csv as _csv
@@ -156,6 +138,8 @@ def cbso_deposits(numero, size=100):
         params = {"page": page, "size": size, "enterpriseNumber": numero,
                   "sort": ["periodEndDate,desc", "depositDate,desc"]}
         r = requests.get(CBSO_API, headers=CBSO_HEADERS, params=params, timeout=30)
+        if r.status_code == 429:
+            raise RateLimited("429 sur deposits")
         if r.status_code != 200:
             break
         data = r.json()
@@ -308,20 +292,19 @@ def ingest_notaire(num_url, cookie=None):
 
 def ingest_cbso(num_url):
     numero = re.sub(r"\D", "", num_url).zfill(10)
+    deps = cbso_deposits(numero)
     save_raw("cbso", num_url, "deposits.json",
-             json.dumps(cbso_deposits(numero), ensure_ascii=False, indent=2))
+             json.dumps(deps, ensure_ascii=False, indent=2))
     h_bin = {"User-Agent": "Mozilla/5.0", "Accept": "*/*",
              "Referer": "https://consult.cbso.nbb.be/"}
+    refs = []
     for annee, dep in comptes_retenus(numero).items():
         did = dep["id"]
-        rp = _get(f"{BROKER}/pdf/{did}", headers=h_bin)
-        if rp.status_code == 200 and rp.content:
-            save_raw("cbso", num_url, f"pdf/{annee}.pdf", rp.content)
-        rx = _get(f"{BROKER}/xbrl/{did}", headers=h_bin)
-        if rx.status_code == 200 and rx.content:
-            save_raw("cbso", num_url, f"xbrl/{annee}.xbrl", rx.content)
-        if annee >= 2021:
-            rc = _get(f"{BROKER}/consult/csv/{did}", headers=h_bin)
-            if rc.status_code == 200 and rc.content:
-                save_raw("cbso", num_url, f"csv/{annee}.csv", rc.content)
-        time.sleep(0.4)
+        rc = _get(f"{BROKER}/consult/csv/{did}", headers=h_bin)
+        if rc.status_code == 429:
+            raise RateLimited(f"429 sur csv {annee}")
+        if rc.status_code == 200 and rc.content:
+            save_raw("cbso", num_url, f"csv/{annee}.csv", rc.content)
+            refs.append(f"csv/{annee}.csv")
+        time.sleep(2)
+    return {"filings_count": len(refs), "refs": refs}
