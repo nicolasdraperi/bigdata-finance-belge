@@ -53,6 +53,22 @@ INDEX_FIELDS = {
     "code":          ["Category", "Code"],
 }
 
+def build_enterprise_finale():
+    client = MongoClient(MONGO_URI)
+    db = client[MONGO_DB]
+    pipeline = [
+        {"$lookup": {"from": "denomination",  "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "denominations"}},
+        {"$lookup": {"from": "address",       "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "addresses"}},
+        {"$lookup": {"from": "activity",      "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "activities"}},
+        {"$lookup": {"from": "contact",       "localField": "EnterpriseNumber", "foreignField": "EntityNumber",     "as": "contacts"}},
+        {"$lookup": {"from": "establishment", "localField": "EnterpriseNumber", "foreignField": "EnterpriseNumber", "as": "establishments"}},
+        {"$merge": {"into": "enterprise_finale", "whenMatched": "replace", "whenNotMatched": "insert"}},
+    ]
+    db.enterprise.aggregate(pipeline, allowDiskUse=True)
+    n = db["enterprise_finale"].estimated_document_count()
+    client.close()
+    return {"enterprise_finale": n}
+
 def ingest_csv_to_mongo(batch_size=50000, force=False):
     import csv as _csv
     csv_dir = Path(LOCAL_CSV_DIR)
