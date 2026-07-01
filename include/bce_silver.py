@@ -251,7 +251,7 @@ def target_hotellerie(force=False):
     print(f"StateDB peuplée : {n} hôtels en pending -> LOADED", flush=True)
     return {"state_db": n, "status": "loaded"}
 
-def scrape_hotels_nbb(batch=20, max_lots=None, pause=15, wait_429=180):
+def scrape_hotels_nbb(batch=20, max_lots=None, pause=2, wait_429=120):
     import bce_ingestion as ing
     import time as _t
     db = _db()
@@ -277,14 +277,13 @@ def scrape_hotels_nbb(batch=20, max_lots=None, pause=15, wait_429=180):
             except ing.RateLimited:
                 state.update_one({"_id": num}, {"$set": {"status": "pending"}})
                 total_429 += 1
-                restants = state.count_documents({"status": "pending"})
-                print(f"  ⚠️ 429 sur {num} — pause {wait_429}s (done: {total_done}, pending: {restants})", flush=True)
+                print(f"  ⚠️ 429 sur {num} — pause {wait_429}s", flush=True)
                 _t.sleep(wait_429)
             except Exception as e:
                 state.update_one({"_id": num}, {"$set": {"status": "pending",
                                                          "last_error": str(e)[:200]}})
                 total_err += 1
-        _t.sleep(3)
+
         lots += 1
         restants = state.count_documents({"status": "pending"})
         print(f"Lot {lots} | done: {total_done} | 429: {total_429} | err: {total_err} | pending: {restants}", flush=True)

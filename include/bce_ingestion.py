@@ -1,18 +1,17 @@
-import json, re, time
+import json, re, time, os, csv, socket, itertools
+from pathlib import Path
 from bs4 import BeautifulSoup
 import requests
 from hdfs import InsecureClient
-import os
-from pathlib import Path
 from pymongo import MongoClient
-import csv
 
+# hdfs
 HDFS_URL    = "http://namenode:9870"
 HDFS_USER   = "root"
 RAW_HDFS    = "/data/raw"
 _hdfs       = InsecureClient(HDFS_URL, user=HDFS_USER)
 
-
+# sources
 HEADERS  = {"User-Agent": "Mozilla/5.0 (compatible; KBO-notebook/1.0)"}
 BASE_URL = "https://kbopub.economie.fgov.be/kbopub/toonondernemingps.html"
 KBO      = "https://kbopub.economie.fgov.be/kbopub"
@@ -20,11 +19,57 @@ EJ_BASE  = "https://www.ejustice.just.fgov.be/cgi_tsv/list.pl"
 BROKER   = "https://consult.cbso.nbb.be/api/external/broker/public/deposits"
 CBSO_API = "https://consult.cbso.nbb.be/api/rs-consult/published-deposits"
 CBSO_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+# Mongo / CSV
 LOCAL_CSV_DIR = "/opt/airflow/data"
 MONGO_URI = "mongodb://root:root@mongo:27017/"
 MONGO_DB  = "bce"
+
+# tor
+USE_TOR = os.getenv("USE_TOR", "0") == "1"
+
+TOR_PROXIES = [
+    {"http": "socks5h://tor1:9050", "https": "socks5h://tor1:9050"},
+    {"http": "socks5h://tor2:9050", "https": "socks5h://tor2:9050"},
+    {"http": "socks5h://tor3:9050", "https": "socks5h://tor3:9050"},
+]
+_tor_cycle = itertools.cycle(TOR_PROXIES)
+
+TOR_CONTROL_HOSTS    = ["tor1", "tor2", "tor3"]
+TOR_CONTROL_PORT     = 9051
+TOR_CONTROL_PASSWORD = "mypass"
+
 class RateLimited(Exception):
     pass
+
+def _next_proxy():
+    return next(_tor_cycle) if USE_TOR else None
+
+def renew_tor_identity():
+    renewed = 0
+    for host in TOR_CONTROL_HOSTS:
+        try:
+            with socket.create_connection((host, TOR_CONTROL_PORT), timeout=10) as sock:
+                sock.sendall(f'AUTHENTICATE "{TOR_CONTROL_PASSWORD}"\r\n'.encode())
+                if b"250" not in sock.recv(1024):
+                    continue
+                sock.sendall(b"SIGNAL NEWNYM\r\n")
+                if b"250" in sock.recv(1024):
+                    renewed += 1
+        except Exception:
+            continue
+    return renewed
+
+INDEX_FIELDS = {
+    "enterprise":    ["EnterpriseNumber"],
+    "denomination":  ["EntityNumber"],
+    "address":       ["EntityNumber"],
+    "activity":      ["EntityNumber"],
+    "contact":       ["EntityNumber"],
+    "establishment": ["EnterpriseNumber", "EstablishmentNumber"],
+    "branch":        ["EnterpriseNumber"],
+    "code":          ["Category", "Code"],
+}
 
 def get_entreprises_from_csv(limit=None):
     client = MongoClient(MONGO_URI)
@@ -40,52 +85,6 @@ def get_entreprises_from_csv(limit=None):
     client.close()
     return numeros
 
-INDEX_FIELDS = {
-    "enterprise":    ["EnterpriseNumber"],
-    "denomination":  ["EntityNumber"],
-    "address":       ["EntityNumber"],
-    "activity":      ["EntityNumber"],
-    "contact":       ["EntityNumber"],
-    "establishment": ["EnterpriseNumber", "EstablishmentNumber"],
-    "branch":        ["EnterpriseNumber"],
-    "code":          ["Category", "Code"],
-}
-
-def ingest_csv_to_mongo(batch_size=50000, force=False):
-    import csv as _csv
-    csv_dir = Path(LOCAL_CSV_DIR)
-    if not csv_dir.exists():
-        raise FileNotFoundError(f"Dossier CSV introuvable : {LOCAL_CSV_DIR}")
-
-    client = MongoClient(MONGO_URI)
-    db = client[MONGO_DB]
-    resume = {}
-    for file in sorted(csv_dir.glob("*.csv")):
-        coll_name = file.stem
-        coll = db[coll_name]
-        existing = coll.estimated_document_count()
-        if existing > 0 and not force:
-            print(f"  {coll_name}: déjà {existing} docs -> SKIP", flush=True)
-            resume[coll_name] = {"rows": existing, "status": "skipped"}
-            continue
-
-        coll.drop()
-        total = 0
-        with open(file, "r", encoding="utf-8-sig", newline="") as f:
-            batch = []
-            for row in _csv.DictReader(f):
-                batch.append(row)
-                if len(batch) >= batch_size:
-                    coll.insert_many(batch, ordered=False); total += len(batch); batch = []
-            if batch:
-                coll.insert_many(batch, ordered=False); total += len(batch)
-        for field in INDEX_FIELDS.get(coll_name, []):
-            coll.create_index(field)
-        resume[coll_name] = {"rows": total, "status": "loaded",
-                             "index": INDEX_FIELDS.get(coll_name, [])}
-        print(f"  {coll_name}: {total} docs -> LOADED", flush=True)
-    client.close()
-    return resume
 def save_raw(source, num_url, filename, content):
     numero = re.sub(r"\D", "", num_url).zfill(10)
     path = f"{RAW_HDFS}/{source}/{numero}/{filename}"
@@ -95,9 +94,24 @@ def save_raw(source, num_url, filename, content):
     _hdfs.write(path, data=data, overwrite=True)
     return path
 
-def _get(url, **kw):
-    kw.setdefault("headers", HEADERS); kw.setdefault("timeout", 30)
-    r = requests.get(url, **kw); r.encoding = "utf-8"
+def _get(url, use_tor=False, _tries=4, **kw):
+    kw.setdefault("headers", HEADERS)
+    kw.setdefault("timeout", 30)
+    if use_tor and USE_TOR:
+        last_err = None
+        for _ in range(_tries):
+            proxy = _next_proxy()
+            try:
+                r = requests.get(url, proxies=proxy, timeout=60,
+                                 **{k: v for k, v in kw.items() if k != "timeout"})
+                r.encoding = "utf-8"
+                return r
+            except requests.exceptions.RequestException as e:
+                last_err = e
+                time.sleep(2)
+        raise last_err
+    r = requests.get(url, **kw)
+    r.encoding = "utf-8"
     return r
 
 def _num9(num_url):
@@ -137,7 +151,7 @@ def cbso_deposits(numero, size=100):
     while True:
         params = {"page": page, "size": size, "enterpriseNumber": numero,
                   "sort": ["periodEndDate,desc", "depositDate,desc"]}
-        r = requests.get(CBSO_API, headers=CBSO_HEADERS, params=params, timeout=30)
+        r = _get(CBSO_API, params=params, headers=CBSO_HEADERS, use_tor=True)
         if r.status_code == 429:
             raise RateLimited("429 sur deposits")
         if r.status_code != 200:
@@ -300,11 +314,11 @@ def ingest_cbso(num_url):
     refs = []
     for annee, dep in comptes_retenus(numero).items():
         did = dep["id"]
-        rc = _get(f"{BROKER}/consult/csv/{did}", headers=h_bin)
+        rc = _get(f"{BROKER}/consult/csv/{did}", headers=h_bin, use_tor=True)
         if rc.status_code == 429:
             raise RateLimited(f"429 sur csv {annee}")
         if rc.status_code == 200 and rc.content:
             save_raw("cbso", num_url, f"csv/{annee}.csv", rc.content)
             refs.append(f"csv/{annee}.csv")
-        time.sleep(2)
+        time.sleep(0.5)
     return {"filings_count": len(refs), "refs": refs}

@@ -5,6 +5,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    USE_TOR: "1"
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -18,6 +19,30 @@ x-airflow-common: &airflow-common
     - bce_net
 
 services:
+  tor1:
+    image: dperson/torproxy
+    container_name: tor1
+    restart: unless-stopped
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks: [bce_net]
+
+  tor2:
+    image: dperson/torproxy
+    container_name: tor2
+    restart: unless-stopped
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks: [bce_net]
+
+  tor3:
+    image: dperson/torproxy
+    container_name: tor3
+    restart: unless-stopped
+    environment:
+      - CONTROL_PASSWORD=mypass
+    networks: [bce_net]
+
   mongo:
     image: mongo:7
     container_name: mongo
@@ -25,10 +50,11 @@ services:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: root
     ports:
-      - "27017:27017"          # accessible depuis ton PC (pour vérifier avec Compass)
+      - "27017:27017"
     volumes:
       - mongo-data:/data/db
-    networks: [ bce_net ]         # même réseau que tout le reste
+    networks: [bce_net]
+
   postgres:
     image: postgres:13
     environment:
@@ -42,6 +68,7 @@ services:
       interval: 10s
       retries: 5
     networks: [bce_net]
+
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
@@ -72,6 +99,7 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
