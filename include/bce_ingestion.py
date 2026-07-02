@@ -42,8 +42,16 @@ TOR_CONTROL_PASSWORD = "mypass"
 class RateLimited(Exception):
     pass
 
+import threading
+_tor_cycle = itertools.cycle(TOR_PROXIES)
+_tor_lock = threading.Lock()
+
 def _next_proxy():
-    return next(_tor_cycle) if USE_TOR else None
+    """Renvoie le prochain proxy Tor (thread-safe), ou None si Tor désactivé."""
+    if not USE_TOR:
+        return None
+    with _tor_lock:
+        return next(_tor_cycle)
 
 def renew_tor_identity():
     renewed = 0

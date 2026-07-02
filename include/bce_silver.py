@@ -251,44 +251,46 @@ def target_hotellerie(force=False):
     print(f"StateDB peuplée : {n} hôtels en pending -> LOADED", flush=True)
     return {"state_db": n, "status": "loaded"}
 
-def scrape_hotels_nbb(batch=20, max_lots=None, pause=2, wait_429=120):
+def scrape_hotels_nbb(batch=200, workers=6, wait_429=60):
+    """Scrape les hôtels pending EN PARALLÈLE via Tor (round-robin). Reprise via StateDB."""
     import bce_ingestion as ing
-    import time as _t
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pymongo import MongoClient
     db = _db()
     state = db["state_db"]
-    total_done, total_err, total_429, lots = 0, 0, 0, 0
+    total = {"done": 0, "err": 0, "r429": 0}
+
+    def _traiter(num):
+        st = MongoClient(MONGO_URI)[MONGO_DB]["state_db"]   # 1 client par thread
+        st.update_one({"_id": num}, {"$set": {"status": "in_progress"}})
+        try:
+            bilan = ing.ingest_cbso(num)
+            st.update_one({"_id": num}, {"$set": {
+                "status": "done",
+                "filings_count": bilan["filings_count"],
+                "downloaded_refs": bilan["refs"]}})
+            return "done"
+        except ing.RateLimited:
+            ing.renew_tor_identity()
+            st.update_one({"_id": num}, {"$set": {"status": "pending"}})
+            return "r429"
+        except Exception as e:
+            st.update_one({"_id": num}, {"$set": {"status": "pending",
+                                                  "last_error": str(e)[:200]}})
+            return "err"
 
     while True:
         lot = list(state.find({"status": "pending"}, {"EnterpriseNumber": 1}).limit(batch))
         if not lot:
             print("Plus aucun hôtel pending -> terminé", flush=True)
             break
-
-        for doc in lot:
-            num = doc["EnterpriseNumber"]
-            state.update_one({"_id": num}, {"$set": {"status": "in_progress"}})
-            try:
-                bilan = ing.ingest_cbso(num)
-                state.update_one({"_id": num}, {"$set": {
-                    "status": "done",
-                    "filings_count": bilan["filings_count"],
-                    "downloaded_refs": bilan["refs"]}})
-                total_done += 1
-            except ing.RateLimited:
-                state.update_one({"_id": num}, {"$set": {"status": "pending"}})
-                total_429 += 1
-                print(f"  ⚠️ 429 sur {num} — pause {wait_429}s", flush=True)
-                _t.sleep(wait_429)
-            except Exception as e:
-                state.update_one({"_id": num}, {"$set": {"status": "pending",
-                                                         "last_error": str(e)[:200]}})
-                total_err += 1
-
-        lots += 1
+        nums = [d["EnterpriseNumber"] for d in lot]
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for f in as_completed({ex.submit(_traiter, n) for n in nums}):
+                res = f.result()
+                key = "done" if res == "done" else ("r429" if res == "r429" else "err")
+                total[key] += 1
         restants = state.count_documents({"status": "pending"})
-        print(f"Lot {lots} | done: {total_done} | 429: {total_429} | err: {total_err} | pending: {restants}", flush=True)
-        if max_lots and lots >= max_lots:
-            break
-        _t.sleep(pause)
+        print(f"done: {total['done']} | 429: {total['r429']} | err: {total['err']} | pending: {restants}", flush=True)
 
-    return {"total_done": total_done, "total_429": total_429, "total_err": total_err}
+    return total
