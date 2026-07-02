@@ -5,6 +5,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
     USE_TOR: "1"
   volumes:
     - ./dags:/opt/airflow/dags
@@ -19,6 +20,51 @@ x-airflow-common: &airflow-common
     - bce_net
 
 services:
+  frontend:
+      image: node:20-slim
+      container_name: frontend
+      working_dir: /app
+      volumes:
+        - ./frontend:/app
+      command: bash -c "npm install && npm run dev"
+      ports:
+        - "5173:5173"
+      networks: [bce_net]
+  api:
+      image: python:3.12-slim
+      container_name: api
+      working_dir: /app
+      volumes:
+        - ./api:/app
+        - ./include:/app/include
+      command: bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+      ports:
+        - "8000:8000"
+      depends_on: [mongo]
+      networks: [bce_net]
+
+  spark-master:
+      image: apache/spark:3.5.1
+      container_name: spark-master
+      command: /opt/spark/sbin/start-master.sh
+      environment:
+        - SPARK_NO_DAEMONIZE=true
+      ports:
+        - "8081:8080"
+        - "7077:7077"
+      networks: [bce_net]
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    depends_on: [spark-master]
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    networks: [bce_net]
+
   tor1:
     image: dperson/torproxy
     container_name: tor1
