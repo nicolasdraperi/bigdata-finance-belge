@@ -7,10 +7,10 @@ from hdfs import InsecureClient
 import re, json, asyncio, time
 import requests as _rq
 from bs4 import BeautifulSoup
-
+import os
 MONGO_URI = "mongodb://root:root@mongo:27017/"
 db = MongoClient(MONGO_URI)["bce"]
-
+SEARCH_SCOPE = os.getenv("SEARCH_SCOPE", "hotels")
 HDFS_API    = InsecureClient("http://namenode:9870", user="root")
 AIRFLOW_API = "http://airflow-webserver:8080/api/v1"
 AIRFLOW_AUTH = ("airflow", "airflow")
@@ -33,11 +33,27 @@ def root():
     return {"service": "BCE Hôtellerie API", "status": "ok"}
 
 @app.get("/search")
-def search(q: str, limit: int = 20):
+def search(q: str, scope: str = "hotels", limit: int = 20):
     q = q.strip()
     if not q:
         return {"results": []}
     digits = re.sub(r"\D", "", q)
+
+    if scope == "hotels":
+        if 4 <= len(digits) <= 10:
+            query = {"_id": _norm(digits.zfill(10))} if len(digits) == 10 else {
+                "_id": {"$regex": "^" + re.escape(digits)}}
+        else:
+            query = {"nom_lower": {"$regex": re.escape(q.lower())}}
+        results = []
+        for doc in db.hotels.find(query).limit(limit):
+            results.append({
+                "enterprise_number": doc["enterprise_number"],
+                "nom": doc["nom"],
+                "status": doc.get("status", ""),
+                "forme": doc.get("forme", ""),
+            })
+        return {"results": results, "count": len(results), "scope": "hotels"}
     if 4 <= len(digits) <= 10:
         num = _norm(digits.zfill(10)) if len(digits) == 10 else None
         query = {"EnterpriseNumber": num} if num else {
@@ -46,8 +62,7 @@ def search(q: str, limit: int = 20):
         query = {"denominations.Denomination": {"$regex": re.escape(q), "$options": "i"}}
     results = []
     for doc in db.enterprise_silver.find(query, {
-        "EnterpriseNumber": 1, "denominations": 1, "StatusLabel": 1,
-        "JuridicalFormLabel": 1
+        "EnterpriseNumber": 1, "denominations": 1, "StatusLabel": 1, "JuridicalFormLabel": 1
     }).limit(limit):
         denoms = doc.get("denominations", [])
         nom = denoms[0]["Denomination"] if denoms else "(sans nom)"
@@ -57,15 +72,23 @@ def search(q: str, limit: int = 20):
             "status": doc.get("StatusLabel", ""),
             "forme": doc.get("JuridicalFormLabel", ""),
         })
-    return {"results": results, "count": len(results)}
+    return {"results": results, "count": len(results), "scope": "all"}
 
 @app.get("/enterprise/{num}")
 def enterprise(num: str):
     num_fmt = _norm(num)
     num_raw = re.sub(r"\D", "", num)
     silver = db.enterprise_silver.find_one({"EnterpriseNumber": num_fmt}, {"_id": 0})
+    enriched = False
     if not silver:
-        raise HTTPException(404, f"Entreprise {num_fmt} introuvable")
+        num_kbo = num_raw.lstrip("0")
+        scraped = _scrape_entreprise_kbo(num_kbo)
+        if not scraped:
+            raise HTTPException(404, f"Entreprise {num_fmt} introuvable (ni en base, ni sur kbopub)")
+        db.enterprise_silver.insert_one(dict(scraped))
+        silver = scraped
+        enriched = True
+
     denoms = silver.get("denominations", [])
     addrs = silver.get("addresses", [])
     acts = silver.get("activities", [])
@@ -82,6 +105,7 @@ def enterprise(num: str):
              "label": a.get("NaceLabel", ""), "classification": a.get("Classification")}
             for a in acts
         ],
+        "enriched": enriched,
     }
     if addrs:
         a = addrs[0]
@@ -198,3 +222,101 @@ def dirigeants(num: str):
     db.dirigeants_cache.update_one({"_id": num_raw},
         {"$set": {"dirigeants": dirs, "count": len(dirs)}}, upsert=True)
     return {"dirigeants": dirs, "source": "scrape"}
+
+def _scrape_liens(num_kbo):
+    r = _rq.get(KBOPUB_URL, params={"lang": "fr", "ondernemingsnummer": num_kbo},
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    if r.status_code != 200:
+        return []
+    soup = BeautifulSoup(r.text, "html.parser")
+    liens, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        if "toonondernemingps.html" not in a["href"] or "ondernemingsnummer=" not in a["href"]:
+            continue
+        numero = a.get_text(" ", strip=True)
+        if not re.match(r"\d{4}\.\d{3}\.\d{3}", numero):
+            continue
+        container, node = None, a
+        for _ in range(5):
+            node = node.parent
+            if node is None:
+                break
+            if "depuis le" in node.get_text(" ", strip=True).lower():
+                container = node
+                break
+        txt = container.get_text(" ", strip=True) if container else numero
+        m_name = re.search(r"\((.+?)\)", txt)
+        entite = m_name.group(1).strip() if m_name else ""
+        after = txt.split(")", 1)[1] if ")" in txt else txt
+        m = re.search(r"(.*?)\s*depuis le\s*(.+)$", after, re.I)
+        nature = (m.group(1) if m else after).strip()
+        date_lien = m.group(2).strip() if m else ""
+        key = (numero, nature, date_lien)
+        if key in seen:
+            continue
+        seen.add(key)
+        liens.append({"entite": entite, "numero": numero,
+                      "date_lien": date_lien, "nature": nature})
+    return liens
+
+@app.get("/enterprise/{num}/liens")
+def liens(num: str):
+    num_raw = re.sub(r"\D", "", num).zfill(10)
+    cache = db.liens_cache.find_one({"_id": num_raw})
+    if cache and "liens" in cache:
+        return {"liens": cache["liens"], "source": "cache"}
+    num_kbo = num_raw.lstrip("0")
+    ls = _scrape_liens(num_kbo)
+    db.liens_cache.update_one({"_id": num_raw},
+        {"$set": {"liens": ls, "count": len(ls)}}, upsert=True)
+    return {"liens": ls, "source": "scrape"}
+
+def _scrape_entreprise_kbo(num_kbo):
+    r = _rq.get(KBOPUB_URL, params={"lang": "fr", "ondernemingsnummer": num_kbo},
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    if r.status_code != 200:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    infos = {}
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all("td", class_=re.compile(r"^(QL|RL)$"))
+        if len(cells) >= 2:
+            label = cells[0].get_text(" ", strip=True).rstrip(":").strip()
+            val_cell = cells[1]
+            for span in val_cell.find_all("span", class_="upd"):
+                span.extract()
+            valeur = val_cell.get_text(" ", strip=True)
+            valeur = re.sub(r"\s+", " ", valeur).strip()
+            if label and valeur and "Pas de données" not in valeur:
+                infos[label] = valeur
+
+    if not infos.get("Dénomination"):
+        return None
+    num_fmt = _norm(num_kbo.zfill(10))
+    nom = infos.get("Dénomination", "")
+    statut = infos.get("Statut", "")
+    forme = infos.get("Forme légale", "")
+    date_debut = infos.get("Date de début", "")
+    adresse_raw = infos.get("Adresse du siège", "")
+    m = re.search(r"(.*?)\s+(\d{4})\s+(.+)$", adresse_raw)
+    addresses = []
+    if m:
+        addresses = [{
+            "TypeOfAddress": "REGO",
+            "StreetFR": m.group(1).strip(),
+            "HouseNumber": "",
+            "Zipcode": m.group(2),
+            "MunicipalityFR": m.group(3).strip(),
+        }]
+
+    doc = {
+        "EnterpriseNumber": num_fmt,
+        "denominations": [{"TypeOfDenomination": "001", "Denomination": nom}],
+        "addresses": addresses,
+        "activities": [],
+        "StatusLabel": statut,
+        "JuridicalFormLabel": forme,
+        "StartDate": date_debut,
+        "_source": "kbopub",
+    }
+    return doc

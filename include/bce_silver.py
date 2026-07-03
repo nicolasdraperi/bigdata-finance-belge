@@ -294,3 +294,39 @@ def scrape_hotels_nbb(batch=200, workers=6, wait_429=60):
         print(f"done: {total['done']} | 429: {total['r429']} | err: {total['err']} | pending: {restants}", flush=True)
 
     return total
+
+def build_hotels_collection():
+    """collection 'hotels' pour recherche rapide."""
+    db = _db()
+    nums = [d["_id"] for d in db.state_db.find({}, {"_id": 1})]
+    print(f"{len(nums)} hôtels à copier", flush=True)
+
+    from pymongo import UpdateOne
+    ops = []
+    cursor = db.enterprise_silver.find(
+        {"EnterpriseNumber": {"$in": nums}},
+        {"EnterpriseNumber": 1, "denominations": 1, "StatusLabel": 1, "JuridicalFormLabel": 1, "_id": 0}
+    )
+    for silver in cursor:
+        num = silver["EnterpriseNumber"]
+        denoms = silver.get("denominations", [])
+        nom = denoms[0]["Denomination"] if denoms else "(sans nom)"
+        ops.append(UpdateOne(
+            {"_id": num},
+            {"$set": {
+                "enterprise_number": num,
+                "nom": nom,
+                "nom_lower": nom.lower(),
+                "status": silver.get("StatusLabel", ""),
+                "forme": silver.get("JuridicalFormLabel", ""),
+            }},
+            upsert=True))
+        if len(ops) >= 1000:
+            db.hotels.bulk_write(ops, ordered=False); ops = []
+    if ops:
+        db.hotels.bulk_write(ops, ordered=False)
+
+    db.hotels.create_index("nom_lower")
+    n = db.hotels.estimated_document_count()
+    print(f"Collection hotels créée : {n} hôtels -> LOADED", flush=True)
+    return {"hotels": n}

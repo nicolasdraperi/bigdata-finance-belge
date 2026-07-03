@@ -1,19 +1,27 @@
 import { useDispatch, useSelector } from 'react-redux'
 import { useNavigate } from 'react-router-dom'
 import { useRef } from 'react'
-import { setQuery, doSearch } from '../store'
+import { setQuery, setScope, doSearch } from '../store'
 
 export default function Search() {
   const dispatch = useDispatch()
   const navigate = useNavigate()
-  const { query, results, loading } = useSelector((s) => s.search)
+  const { query, results, loading, scope } = useSelector((s) => s.search)
+  const history = useSelector((s) => s.enterprise.history)
   const timer = useRef(null)
 
   const onChange = (e) => {
     const q = e.target.value
     dispatch(setQuery(q))
     if (timer.current) clearTimeout(timer.current)
-    if (q.trim().length >= 2) timer.current = setTimeout(() => dispatch(doSearch(q)), 300)
+    if (q.trim().length >= 2) {
+      timer.current = setTimeout(() => dispatch(doSearch({ q, scope })), 300)
+    }
+  }
+
+  const toggleScope = (newScope) => {
+    dispatch(setScope(newScope))
+    if (query.trim().length >= 2) dispatch(doSearch({ q: query, scope: newScope }))
   }
 
   return (
@@ -30,7 +38,7 @@ export default function Search() {
 
       <div className="max-w-3xl mx-auto px-4 py-20">
         {/* Titre */}
-        <div className="text-center mb-12">
+        <div className="text-center mb-8">
           <h1 className="text-6xl md:text-7xl font-extrabold tracking-tight
                          bg-gradient-to-r from-violet-300 via-fuchsia-300 to-cyan-300
                          bg-clip-text text-transparent drop-shadow-2xl">
@@ -39,6 +47,32 @@ export default function Search() {
           <p className="mt-4 text-slate-300/80 text-lg font-light">
             Données financières des entreprises hôtelières belges
           </p>
+        </div>
+
+        {/* Toggle scope */}
+        <div className="flex justify-center mb-6">
+          <div className="inline-flex bg-white/5 backdrop-blur-xl rounded-xl border border-white/10 p-1">
+            <button
+              onClick={() => toggleScope('hotels')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                scope === 'hotels'
+                  ? 'bg-gradient-to-r from-violet-500 to-cyan-500 text-white'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Hôtels uniquement
+            </button>
+            <button
+              onClick={() => toggleScope('all')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                scope === 'all'
+                  ? 'bg-gradient-to-r from-violet-500 to-cyan-500 text-white'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Toutes les entreprises
+            </button>
+          </div>
         </div>
 
         {/* Barre de recherche en verre */}
@@ -62,6 +96,32 @@ export default function Search() {
             {loading && <span className="spinner absolute right-5" />}
           </div>
         </div>
+
+        {/* Historique : récemment consultées */}
+        {history.length > 0 && query.length < 2 && (
+          <div className="mt-8">
+            <div className="text-slate-400 text-sm font-medium mb-3 flex items-center gap-2">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Récemment consultées
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {history.map((h) => (
+                <button
+                  key={h.num}
+                  onClick={() => navigate(`/enterprise/${h.num}`)}
+                  className="px-4 py-2 rounded-xl bg-white/5 backdrop-blur-xl border border-white/10
+                             text-slate-200 text-sm hover:bg-white/15 hover:border-white/30
+                             transition-all hover:scale-105"
+                >
+                  {h.nom}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Résultats en cartes de verre */}
         <div className="mt-6 space-y-3">

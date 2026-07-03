@@ -1,18 +1,26 @@
-import { useParams, Link } from 'react-router-dom'
+import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useDispatch, useSelector } from 'react-redux'
 import { useEffect } from 'react'
-import { fetchEnterprise, fetchDirigeants } from '../store'
+import { fetchEnterprise, fetchDirigeants, fetchLiens, loadFromCache } from '../store'
 import Sankey from '../components/Sankey'
 import StatutsNotaire from '../components/StatutsNotaire'
 
 export default function Enterprise() {
   const { num } = useParams()
   const dispatch = useDispatch()
-  const { data, dirigeants, loading, error } = useSelector((s) => s.enterprise)
+  const navigate = useNavigate()
+  const { data, dirigeants, liens, loading, error, cache } = useSelector((s) => s.enterprise)
 
-  useEffect(() => {
-    dispatch(fetchEnterprise(num))
-    dispatch(fetchDirigeants(num))
+useEffect(() => {
+    if (cache[num]?.data) {
+      dispatch(loadFromCache(num))
+      if (!cache[num].liens) dispatch(fetchLiens(num))
+      if (!cache[num].dirigeants) dispatch(fetchDirigeants(num))
+    } else {
+      dispatch(fetchEnterprise(num))
+      dispatch(fetchDirigeants(num))
+      dispatch(fetchLiens(num))
+    }
   }, [num, dispatch])
 
   return (
@@ -126,6 +134,28 @@ export default function Enterprise() {
                 </ul>
               ) : <Empty>Aucun dirigeant trouvé</Empty>}
             </Card>
+
+            {/* Liens entre entités */}
+            {liens && liens.length > 0 && (
+              <Card title="Liens entre entités">
+                <ul className="space-y-2">
+                  {liens.map((l, i) => (
+                    <li key={i} className="flex items-center justify-between gap-4 py-2 border-b border-white/5 last:border-0">
+                      <div className="min-w-0">
+                        <button
+                          onClick={() => navigate(`/enterprise/${l.numero}`)}
+                          className="text-left text-white font-medium hover:text-cyan-300 transition truncate block w-full"
+                        >
+                          {l.entite || l.numero}
+                        </button>
+                        <span className="text-slate-400 text-sm">{l.nature}</span>
+                      </div>
+                      <span className="text-xs text-slate-500 shrink-0">{l.date_lien}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            )}
 
             {/* Statuts notariés */}
             <Card title="Statuts notariés">

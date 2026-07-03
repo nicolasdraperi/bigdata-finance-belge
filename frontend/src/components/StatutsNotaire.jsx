@@ -50,7 +50,7 @@ export default function StatutsNotaire({ num }) {
                      text-white text-sm font-semibold shadow-lg shadow-violet-500/20
                      hover:scale-[1.03] hover:shadow-cyan-500/20 transition"
         >
-          📜 Charger les statuts notariés
+          Charger les statuts notariés
         </button>
       )}
 
